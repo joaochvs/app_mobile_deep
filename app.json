@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "deep",
+    "slug": "app-consulta",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/splash-logo.png",
+    "scheme": "appconsulta",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "backgroundColor": "#0A0E2E",
+      "resizeMode": "cover"
+    },
+    "assetBundlePatterns": [
+      "assets/fotos/*",
+      "assets/**/*"
+    ],
+    "ios": {
+      "icon": "./assets/images/splash-logo.png"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#2D3580",
+        "foregroundImage": "./assets/images/splash-logo.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/splash-logo.png"
+    },
+    "plugins": [
+      "expo-router",
+    [
+      "expo-splash-screen",
+      {
+        "backgroundColor": "#0A0E2E",
+        "image": "./assets/images/splash.png",
+        "imageWidth": 1242,
+        "android": {
+          "image": "./assets/images/splash.png",
+          "backgroundColor": "#0A0E2E"
+        }
+      }
+    ],
+      "expo-sqlite",
+      "expo-asset"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
