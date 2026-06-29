@@ -1,6 +1,7 @@
 import { Picker } from '@react-native-picker/picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Linking from 'expo-linking';
+import { Stack } from 'expo-router';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -176,17 +177,21 @@ export default function Home() {
   const percentual = totalImgs > 0 ? Math.round((baixadas / totalImgs) * 100) : 0;
 
   return (
-    <View style={{ flex: 1, backgroundColor: C.cinzaClaro }}>
-      <StatusBar barStyle="light-content" backgroundColor={C.azul} />
+    <>
+      <Stack.Screen options={{ headerShown: false }} />
 
-      {/* HEADER */}
-      <View style={styles.header}>
-        <View style={styles.logoContainer}>
-          <Text style={styles.logoText}>deep</Text>
-          <View style={styles.logoArc} />
+      <View style={{ flex: 1, backgroundColor: C.cinzaClaro }}>
+        <StatusBar barStyle="light-content" backgroundColor={C.azul} />
+
+        {/* HEADER */}
+        <View style={styles.header}>
+          <View style={styles.logoContainer}>
+            <Text style={styles.logoText}>deep</Text>
+            <View style={styles.logoArc} />
+          </View>
+          <Text style={styles.headerSub}>Consulta de Imóveis</Text>
         </View>
-        <Text style={styles.headerSub}>Consulta de Imóveis</Text>
-      </View>
+
 
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
 
@@ -320,6 +325,7 @@ export default function Home() {
         <View style={{ height: 32 }} />
       </ScrollView>
     </View>
+    </>
   );
 }
 

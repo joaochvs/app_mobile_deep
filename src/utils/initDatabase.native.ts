@@ -13,7 +13,7 @@ export async function initDatabase() {
     await asset.downloadAsync();
 
     await FileSystem.copyAsync({
-      from: asset.localUri!,
+      from: asset.localUri as string,
       to: dbPath,
     });
   }
