@@ -1,8 +1,11 @@
+import Constants from 'expo-constants';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Linking from 'expo-linking';
+import * as Updates from 'expo-updates';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   AppState,
   AppStateStatus,
   FlatList,
@@ -43,6 +46,20 @@ function comCacheBusting(url: string) {
   return `${url}${separador}t=${Date.now()}`;
 }
 
+// 🔥 NOVO: envolve qualquer Promise com um limite de tempo.
+// Sem isso, uma operação de rede/arquivo que trava (ex: conexão instável,
+// query presa no SQLite) deixa a tela em "carregando" para sempre,
+// e o usuário precisa fechar o app pra sair do estado travado.
+function comTimeout<T>(promise: Promise<T>, ms: number, mensagemErro: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(mensagemErro)), ms);
+    promise.then(
+      (valor) => { clearTimeout(timer); resolve(valor); },
+      (erro) => { clearTimeout(timer); reject(erro); }
+    );
+  });
+}
+
 // ─── CORES ───────────────────────────────────────────────
 const C = {
   azul:          '#2D3580',
@@ -77,6 +94,34 @@ async function testarConectividade(): Promise<boolean> {
   }
 }
 
+// 🔥 checa se tem uma atualização OTA (eas update) disponível e aplica.
+// Isso evita depender só do usuário fechar e reabrir o app do zero —
+// se ele já está com o app aberto, essa função busca e aplica na hora
+// (e reinicia o app sozinho pra carregar o JS novo).
+// Retorna uma mensagem descrevendo o que aconteceu, pra quem chamar
+// poder exibir isso na tela (ex: o botão de debug).
+async function verificarAtualizacaoOTA(): Promise<string> {
+  // em desenvolvimento (Expo Go / dev client) o expo-updates não funciona
+  // de verdade — só faz sentido em builds de preview/produção
+  if (__DEV__) {
+    return 'Updates OTA não funcionam em modo desenvolvimento (Expo Go / dev client). Teste num build de preview ou produção instalado no aparelho.';
+  }
+  try {
+    const update = await Updates.checkForUpdateAsync();
+    if (update.isAvailable) {
+      await Updates.fetchUpdateAsync();
+      // reloadAsync reinicia o app — o texto abaixo nem chega a aparecer
+      // na prática, mas deixamos por segurança
+      await Updates.reloadAsync();
+      return 'Atualização encontrada e aplicada! Reiniciando o app...';
+    }
+    return 'Nenhuma atualização nova disponível — você já está na versão mais recente.';
+  } catch (e: any) {
+    console.log('Erro ao checar atualização OTA:', e);
+    return `Erro ao checar atualização: ${e?.message ?? 'desconhecido'}`;
+  }
+}
+
 export default function Home() {
   const [db, setDb]                           = useState<any>(null);
   const dbRef                                  = useRef<any>(null); // espelha "db" para uso em closures (AppState listener)
@@ -86,6 +131,30 @@ export default function Home() {
   const [matricula, setMatricula]             = useState('');
   const [resultado, setResultado]             = useState<any>(null);
   const [fotoUri, setFotoUri]                 = useState<string | null>(null);
+  const [erroBusca, setErroBusca]             = useState('');
+
+  // ── debug de versão/update (acesso escondido, só pra você) ──
+  const [modalDebugVisivel, setModalDebugVisivel] = useState(false);
+  const [checandoUpdate, setChecandoUpdate]       = useState(false);
+  const [statusUpdateDebug, setStatusUpdateDebug] = useState('');
+  const toquesLogoRef = useRef(0);
+  const toquesLogoTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function aoTocarNoLogo() {
+    toquesLogoRef.current += 1;
+    if (toquesLogoTimeoutRef.current) clearTimeout(toquesLogoTimeoutRef.current);
+
+    if (toquesLogoRef.current >= 5) {
+      toquesLogoRef.current = 0;
+      setModalDebugVisivel(true);
+      return;
+    }
+
+    // se passar 1.5s sem tocar de novo, zera a contagem
+    toquesLogoTimeoutRef.current = setTimeout(() => {
+      toquesLogoRef.current = 0;
+    }, 1500);
+  }
 
   // ── status da verificação/atualização do banco (banner no topo) ──
   const [statusVerificacao, setStatusVerificacao] = useState('');
@@ -104,7 +173,21 @@ export default function Home() {
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const bannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // 🔥 NOVOS REFS DE CONTROLE
+  // Cada vez que o usuário dispara uma busca/sincronização, incrementamos o
+  // "id" correspondente. Se um resultado antigo chegar depois de um id mais
+  // novo já ter sido gerado, ele é simplesmente descartado — na prática isso
+  // cancela a busca anterior quando o usuário clica de novo.
+  const searchIdRef      = useRef(0);
+  const syncIdRef         = useRef(0);
+  const verificandoRef    = useRef(false); // evita 2 verificações de banco simultâneas
+  const sincronizandoRef  = useRef(false); // espelha "sincronizando" para uso em closures
+
   useEffect(() => {
+    // 🔥 checa se tem atualização OTA (código novo publicado via eas update)
+    // assim que o app abre. Não bloqueia nada — roda em paralelo.
+    verificarAtualizacaoOTA();
+
     // primeira abertura do app (cold start) — mostra splash completo
     verificarBanco(true);
 
@@ -113,7 +196,11 @@ export default function Home() {
     const subscription = AppState.addEventListener('change', (nextState) => {
       const estavaEmSegundoPlano = appStateRef.current.match(/inactive|background/);
       if (estavaEmSegundoPlano && nextState === 'active') {
-        verificarBanco(false);
+        // 🔥 se tiver uma sincronização de fotos rolando, não mexe no banco agora
+        // (evita fechar a conexão / trocar o arquivo .db no meio de uma operação)
+        if (!sincronizandoRef.current) {
+          verificarBanco(false);
+        }
       }
       appStateRef.current = nextState;
     });
@@ -145,6 +232,11 @@ export default function Home() {
   // inicial=true  → cold start, mostra splash de carregamento
   // inicial=false → app voltou do background, mostra só o banner no topo
   async function verificarBanco(inicial: boolean) {
+    // 🔥 evita rodar duas verificações ao mesmo tempo (ex: usuário sai e volta
+    // do app rapidamente, disparando o listener 2x em sequência)
+    if (verificandoRef.current) return;
+    verificandoRef.current = true;
+
     if (inicial) setCarregando(true);
     mostrarStatus("Procurando atualizações...", 'checking');
 
@@ -163,13 +255,18 @@ export default function Home() {
       try {
         // cache-busting: garante que pega a versão real do Drive,
         // não uma resposta cacheada pelo SO/CDN
-        const response = await fetch(comCacheBusting(VERSION_URL), {
-          cache: 'no-store',
-          headers: {
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-          },
-        });
+        // 🔥 com timeout — sem isso, uma rede lenta trava aqui pra sempre
+        const response = await comTimeout(
+          fetch(comCacheBusting(VERSION_URL), {
+            cache: 'no-store',
+            headers: {
+              'Cache-Control': 'no-cache',
+              'Pragma': 'no-cache',
+            },
+          }),
+          10000,
+          'Timeout ao verificar versão do banco.'
+        );
         const remote      = await response.json();
         let localVersion  = 0;
         const info        = await FileSystem.getInfoAsync(versionPath);
@@ -188,7 +285,13 @@ export default function Home() {
           await FileSystem.deleteAsync(dbPath + "-wal", { idempotent: true });
           await FileSystem.deleteAsync(dbPath + "-shm", { idempotent: true });
 
-          await FileSystem.downloadAsync(comCacheBusting(DB_URL), dbPath);
+          // 🔥 com timeout — o banco pode ser um arquivo grande, mas 30s é
+          // tempo suficiente pra não travar em conexões ruins
+          await comTimeout(
+            FileSystem.downloadAsync(comCacheBusting(DB_URL), dbPath),
+            30000,
+            'Timeout ao baixar o banco de dados.'
+          );
           await FileSystem.writeAsStringAsync(versionPath, JSON.stringify(remote));
 
           mostrarStatus("Banco atualizado com sucesso!", 'success', true);
@@ -201,6 +304,7 @@ export default function Home() {
 
       await carregarBanco();
     } finally {
+      verificandoRef.current = false;
       if (inicial) setCarregando(false);
     }
   }
@@ -232,7 +336,12 @@ export default function Home() {
 
   async function baixarImagemComRetry(url: string, path: string) {
     for (let i = 0; i < 3; i++) {
-      try { await FileSystem.downloadAsync(url, path); return; }
+      try {
+        // 🔥 com timeout por tentativa — uma foto que não baixa não pode
+        // travar a sincronização inteira
+        await comTimeout(FileSystem.downloadAsync(url, path), 15000, 'Timeout ao baixar imagem.');
+        return;
+      }
       catch { await delay(300); }
     }
   }
@@ -244,92 +353,144 @@ export default function Home() {
       return;
     }
 
+    // 🔥 novo "id" de sincronização — se essa função for chamada de novo
+    // antes de terminar, a execução antiga se auto-cancela nos pontos
+    // de checagem abaixo (idDoSync !== syncIdRef.current)
+    const idDoSync = ++syncIdRef.current;
+
     setErroSync('');
     setStatusSync('');
     setSincronizando(true);
+    sincronizandoRef.current = true;
     setStatusSync("Verificando conexão...");
 
-    const online = await testarConectividade();
+    try {
+      const online = await testarConectividade();
+      if (idDoSync !== syncIdRef.current) return; // cancelado
 
-    if (!online) {
-      setErroSync("Sem conexão com a internet. Verifique sua rede e tente novamente.");
-      setStatusSync('');
-      setSincronizando(false);
-      return;
-    }
+      if (!online) {
+        setErroSync("Sem conexão com a internet. Verifique sua rede e tente novamente.");
+        return;
+      }
 
-    setStatusSync("Baixando imagens do bairro...");
-    await FileSystem.makeDirectoryAsync(
-      FileSystem.documentDirectory + "fotos",
-      { intermediates: true }
-    );
+      setStatusSync("Baixando imagens do bairro...");
+      await FileSystem.makeDirectoryAsync(
+        FileSystem.documentDirectory + "fotos",
+        { intermediates: true }
+      );
 
-    const result = await db.getAllAsync(
-      "SELECT foto FROM casas WHERE UPPER(bairro)=UPPER(?)", [bairroSelecionado]
-    );
-    const fotos = result.filter((i: any) => i.foto);
-    setTotalImgs(fotos.length);
-    setBaixadas(0);
+      if (!dbRef.current) throw new Error('Banco de dados ainda não está pronto.');
 
-    let count      = 0;
-    const LIMITE   = 3;
+      const result = await dbRef.current.getAllAsync(
+        "SELECT foto FROM casas WHERE UPPER(bairro)=UPPER(?)", [bairroSelecionado]
+      );
+      if (idDoSync !== syncIdRef.current) return; // cancelado
 
-    for (let i = 0; i < fotos.length; i += LIMITE) {
-      const lote = fotos.slice(i, i + LIMITE);
-      await Promise.all(lote.map(async (item: any) => {
-        // a coluna "foto" já contém a URL completa do Google Drive
-        // (ex: https://drive.google.com/thumbnail?id=XXXX&sz=w1000)
-        const parts = item.foto.split("id=");
-        if (parts.length < 2) return;
-        const id   = parts[1].split("&")[0];
-        const url  = item.foto; // usa a URL real armazenada no banco
-        const path = FileSystem.documentDirectory + "fotos/" + id + ".jpg";
-        const info = await FileSystem.getInfoAsync(path);
-        if (!info.exists) await baixarImagemComRetry(url, path);
-        count++;
-        setBaixadas(count);
-      }));
-      await delay(150);
-    }
-
-    setStatusSync("Bairro sincronizado!");
-    setSincronizando(false);
-    setTimeout(() => {
-      setStatusSync('');
-      setTotalImgs(0);
+      const fotos = result.filter((i: any) => i.foto);
+      setTotalImgs(fotos.length);
       setBaixadas(0);
-    }, 3000);
+
+      let count      = 0;
+      const LIMITE   = 3;
+
+      for (let i = 0; i < fotos.length; i += LIMITE) {
+        if (idDoSync !== syncIdRef.current) return; // cancelado no meio do loop
+
+        const lote = fotos.slice(i, i + LIMITE);
+        await Promise.all(lote.map(async (item: any) => {
+          // a coluna "foto" já contém a URL completa do Google Drive
+          // (ex: https://drive.google.com/thumbnail?id=XXXX&sz=w1000)
+          const parts = item.foto.split("id=");
+          if (parts.length < 2) return;
+          const id   = parts[1].split("&")[0];
+          const url  = item.foto; // usa a URL real armazenada no banco
+          const path = FileSystem.documentDirectory + "fotos/" + id + ".jpg";
+          const info = await FileSystem.getInfoAsync(path);
+          if (!info.exists) await baixarImagemComRetry(url, path);
+          count++;
+          if (idDoSync === syncIdRef.current) setBaixadas(count);
+        }));
+        await delay(150);
+      }
+
+      if (idDoSync !== syncIdRef.current) return; // cancelado
+
+      setStatusSync("Bairro sincronizado!");
+      setTimeout(() => {
+        if (idDoSync === syncIdRef.current) {
+          setStatusSync('');
+          setTotalImgs(0);
+          setBaixadas(0);
+        }
+      }, 3000);
+    } catch (e: any) {
+      if (idDoSync === syncIdRef.current) {
+        setErroSync(e?.message || 'Erro ao sincronizar as imagens. Tente novamente.');
+      }
+    } finally {
+      if (idDoSync === syncIdRef.current) {
+        setSincronizando(false);
+        sincronizandoRef.current = false;
+      }
+    }
   }
 
   // ─── BUSCA ────────────────────────────────────────────
   async function buscar() {
     if (!matricula.trim()) return;
+
+    // 🔥 novo "id" de busca — isso é o que resolve o loop infinito:
+    // se essa mesma função for chamada de novo (usuário clicou "Buscar"
+    // outra vez, ou trocou a matrícula), a busca antiga vira "obsoleta"
+    // e seu resultado é ignorado quando (se) ela finalmente responder.
+    const idDaBusca = ++searchIdRef.current;
+
     setBuscando(true);
     setResultado(null);
     setFotoUri(null);
+    setErroBusca('');
 
-    const result = await db.getAllAsync(
-      'SELECT * FROM casas WHERE matricula = ?', [matricula.trim()]
-    );
+    try {
+      if (!dbRef.current) {
+        throw new Error('Banco de dados ainda não está pronto. Tente novamente em instantes.');
+      }
 
-    if (result.length > 0) {
-      const item = result[0];
-      setResultado(item);
-      if (item.foto) {
-        const parts = item.foto.split("id=");
-        if (parts.length >= 2) {
-          const id        = parts[1].split("&")[0];
-          const localPath = FileSystem.documentDirectory + "fotos/" + id + ".jpg";
-          const info      = await FileSystem.getInfoAsync(localPath);
-          setFotoUri(
-            info.exists
-              ? localPath
-              : item.foto // usa a URL do Drive direto se não tiver baixado ainda
-          );
+      // 🔥 timeout de 10s — se a query travar, a gente não fica preso pra sempre
+      const result = await comTimeout(
+        dbRef.current.getAllAsync('SELECT * FROM casas WHERE matricula = ?', [matricula.trim()]),
+        10000,
+        'A busca demorou demais e foi cancelada. Tente novamente.'
+      );
+
+      // se o usuário já iniciou outra busca enquanto esta rodava, descarta
+      if (idDaBusca !== searchIdRef.current) return;
+
+      if (result.length > 0) {
+        const item = result[0];
+        setResultado(item);
+        if (item.foto) {
+          const parts = item.foto.split("id=");
+          if (parts.length >= 2) {
+            const id        = parts[1].split("&")[0];
+            const localPath = FileSystem.documentDirectory + "fotos/" + id + ".jpg";
+            const info      = await FileSystem.getInfoAsync(localPath);
+            if (idDaBusca !== searchIdRef.current) return; // cancelado nesse meio-tempo
+            setFotoUri(
+              info.exists
+                ? localPath
+                : item.foto // usa a URL do Drive direto se não tiver baixado ainda
+            );
+          }
         }
       }
+    } catch (e: any) {
+      if (idDaBusca !== searchIdRef.current) return; // busca já cancelada, ignora erro
+      setErroBusca(e?.message || 'Erro ao buscar a matrícula. Tente novamente.');
+    } finally {
+      // só limpa o "carregando" se essa ainda for a busca mais recente —
+      // senão a gente ia esconder o spinner de uma busca nova por engano
+      if (idDaBusca === searchIdRef.current) setBuscando(false);
     }
-    setBuscando(false);
   }
 
   // ─── SPLASH (apenas no cold start) ────────────────────
@@ -365,10 +526,10 @@ export default function Home() {
 
       {/* HEADER */}
       <View style={styles.header}>
-        <View style={styles.logoContainer}>
+        <Pressable onPress={aoTocarNoLogo} style={styles.logoContainer}>
           <Text style={styles.logoText}>deep</Text>
           <View style={styles.logoArc} />
-        </View>
+        </Pressable>
         <Text style={styles.headerSub}>Consulta de Matrículas</Text>
       </View>
 
@@ -394,7 +555,10 @@ export default function Home() {
             placeholder="Ex: CARAÇA_0002"
             placeholderTextColor={C.cinzaTexto}
             value={matricula}
-            onChangeText={setMatricula}
+            onChangeText={(texto) => {
+              setMatricula(texto);
+              if (erroBusca) setErroBusca('');
+            }}
             style={styles.input}
             autoCapitalize="characters"
             returnKeyType="search"
@@ -409,6 +573,14 @@ export default function Home() {
               : <Text style={styles.btnPrimarioTexto}>Buscar</Text>
             }
           </Pressable>
+          {buscando ? (
+            <Text style={styles.dicaCancelar}>Toque em "Buscar" de novo a qualquer momento para cancelar esta busca.</Text>
+          ) : null}
+          {erroBusca ? (
+            <View style={styles.erroBox}>
+              <Text style={styles.erroTexto}>⚠️  {erroBusca}</Text>
+            </View>
+          ) : null}
         </View>
 
         {/* RESULTADO */}
@@ -453,7 +625,7 @@ export default function Home() {
               </Pressable>
             ) : null}
           </View>
-        ) : matricula && !buscando ? (
+        ) : matricula && !buscando && !erroBusca ? (
           <View style={styles.card}>
             <Text style={styles.vazio}>Nenhum imóvel encontrado</Text>
             <Text style={styles.vazioSub}>Verifique a matrícula e tente novamente</Text>
@@ -481,17 +653,23 @@ export default function Home() {
             <Text style={{ color: C.cinzaTexto, fontSize: 16 }}>▾</Text>
           </Pressable>
 
-          {/* MODAL CUSTOMIZADO — fundo branco, letras pretas */}
+          {/* MODAL CUSTOMIZADO — fundo branco, letras pretas
+              🔥 estrutura corrigida: o fundo que fecha ao tocar (backdrop)
+              agora é um elemento SEPARADO do conteúdo, não um pai dele.
+              Antes o conteúdo era filho do Pressable de fechar, o que em
+              alguns aparelhos Android fazia o toque nos itens de dentro
+              não ser reconhecido corretamente (ficava "inclicável"). */}
           <Modal
             visible={modalBairroVisivel}
             transparent
             animationType="slide"
             onRequestClose={() => setModalBairroVisivel(false)}
           >
-            <Pressable
-              style={styles.modalOverlay}
-              onPress={() => setModalBairroVisivel(false)}
-            >
+            <View style={styles.modalOverlay}>
+              <Pressable
+                style={StyleSheet.absoluteFill}
+                onPress={() => setModalBairroVisivel(false)}
+              />
               <View style={styles.modalContainer}>
                 <View style={styles.modalHeader}>
                   <Text style={styles.modalTitulo}>Selecione um bairro</Text>
@@ -529,7 +707,7 @@ export default function Home() {
                   )}
                 />
               </View>
-            </Pressable>
+            </View>
           </Modal>
 
           <Pressable
@@ -539,13 +717,15 @@ export default function Home() {
               pressed && { opacity: 0.85 },
             ]}
             onPress={sincronizar}
-            disabled={sincronizando}
           >
             {sincronizando
               ? <ActivityIndicator color={C.branco} />
               : <Text style={styles.btnSyncTexto}>⬇  Sincronizar imagens</Text>
             }
           </Pressable>
+          {sincronizando ? (
+            <Text style={styles.dicaCancelar}>Toque no botão de novo para cancelar esta sincronização.</Text>
+          ) : null}
 
           {/* ERRO */}
           {erroSync ? (
@@ -575,8 +755,71 @@ export default function Home() {
           )}
         </View>
 
+        {/* rodapé simples — só a versão, discreto, útil pra suporte
+            ("qual versão você está usando?") sem poluir a tela do usuário */}
+        <Text style={styles.rodapeVersao}>v{Constants.expoConfig?.version ?? '?'}</Text>
+
         <View style={{ height: 32 }} />
       </ScrollView>
+
+      {/* 🔥 MODAL DE DEBUG — só pra você. Acessado tocando 5x seguidas
+          no logo "deep" no header. Mostra tudo que precisa pra confirmar
+          se um "eas update" realmente chegou no aparelho. */}
+      <Modal
+        visible={modalDebugVisivel}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setModalDebugVisivel(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => setModalDebugVisivel(false)}
+          />
+          <View style={styles.debugContainer}>
+            <Text style={styles.modalTitulo}>Debug — informações do build</Text>
+            <View style={{ marginTop: 12 }}>
+              <Text style={styles.debugLinha}>Versão do app: {Constants.expoConfig?.version ?? '—'}</Text>
+              <Text style={styles.debugLinha}>Canal: {Updates.channel ?? '—'}</Text>
+              <Text style={styles.debugLinha}>Runtime version: {Updates.runtimeVersion ?? '—'}</Text>
+              <Text style={styles.debugLinha}>
+                Update OTA: {Updates.updateId ?? 'nenhum (rodando build embutido)'}
+              </Text>
+              <Text style={styles.debugLinha}>
+                Publicado em: {Updates.createdAt ? Updates.createdAt.toLocaleString('pt-BR') : '—'}
+              </Text>
+              <Text style={styles.debugLinha}>É build embutido: {Updates.isEmbeddedLaunch ? 'sim' : 'não'}</Text>
+            </View>
+            <Pressable
+              style={[styles.debugBotaoChecar, checandoUpdate && { opacity: 0.7 }]}
+              onPress={async () => {
+                Alert.alert('Checando...', 'Botão pressionado, iniciando checagem.');
+                setChecandoUpdate(true);
+                setStatusUpdateDebug('');
+                const resultado = await verificarAtualizacaoOTA();
+                setStatusUpdateDebug(resultado);
+                setChecandoUpdate(false);
+                Alert.alert('Resultado', resultado);
+              }}
+              disabled={checandoUpdate}
+            >
+              {checandoUpdate
+                ? <ActivityIndicator color={C.branco} size="small" />
+                : <Text style={styles.debugBotaoTexto}>Checar atualização agora</Text>
+              }
+            </Pressable>
+            {statusUpdateDebug ? (
+              <Text style={styles.debugStatus}>{statusUpdateDebug}</Text>
+            ) : null}
+            <Pressable
+              style={styles.debugBotaoFechar}
+              onPress={() => setModalDebugVisivel(false)}
+            >
+              <Text style={styles.debugBotaoFecharTexto}>Fechar</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -698,6 +941,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 16,
     letterSpacing: 0.3,
+  },
+  dicaCancelar: {
+    color: C.cinzaTexto,
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 8,
   },
 
   // ── resultado ───────────────────────────────────────────
@@ -923,5 +1172,55 @@ const styles = StyleSheet.create({
     height: 8,
     backgroundColor: C.laranja,
     borderRadius: 4,
+  },
+
+  // ── rodapé de versão / debug de update OTA ──────────────
+  rodapeVersao: {
+    fontSize: 10,
+    color: C.cinzaTexto,
+    textAlign: 'center',
+    marginTop: 12,
+    opacity: 0.6,
+  },
+  debugContainer: {
+    width: '85%',
+    backgroundColor: C.branco,
+    borderRadius: 16,
+    padding: 20,
+  },
+  debugLinha: {
+    fontSize: 13,
+    color: C.preto,
+    marginBottom: 6,
+    lineHeight: 18,
+  },
+  debugBotaoChecar: {
+    marginTop: 16,
+    backgroundColor: C.azul,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  debugBotaoTexto: {
+    color: C.branco,
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  debugStatus: {
+    marginTop: 12,
+    fontSize: 12,
+    color: C.cinzaTexto,
+    lineHeight: 17,
+    textAlign: 'center',
+  },
+  debugBotaoFechar: {
+    marginTop: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  debugBotaoFecharTexto: {
+    color: C.cinzaTexto,
+    fontSize: 13,
+    fontWeight: '600',
   },
 });

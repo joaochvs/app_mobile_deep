@@ -13,7 +13,7 @@ from google.auth.transport.requests import Request
 
 # ─── CONFIGURAÇÃO ───────────────────────────────────────
 PASTA_DRIVE_ID = "1EdRItu4bu-dsbn_lIIxSqbATihyvmzmb"
-ARQUIVO_EXCEL  = r"C:\Users\jp\Desktop\app_mobile_deep\data\REVISITAS_CENSO.xlsx"
+ARQUIVO_EXCEL  = r"data\REVISITAS_CENSO.xlsx"
 CACHE_IDS      = "data/cache_ids.json"
 # ────────────────────────────────────────────────────────
 
