@@ -20,6 +20,7 @@
       "icon": "./assets/images/splash-logo.png"
     },
     "android": {
+      "package": "com.joaopedro.deep",
       "adaptiveIcon": {
         "backgroundColor": "#2D3580",
         "foregroundImage": "./assets/images/splash-logo.png"
@@ -32,24 +33,36 @@
     },
     "plugins": [
       "expo-router",
-    [
-      "expo-splash-screen",
-      {
-        "backgroundColor": "#0A0E2E",
-        "image": "./assets/images/splash.png",
-        "imageWidth": 1242,
-        "android": {
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0A0E2E",
           "image": "./assets/images/splash.png",
-          "backgroundColor": "#0A0E2E"
+          "imageWidth": 1242,
+          "android": {
+            "image": "./assets/images/splash.png",
+            "backgroundColor": "#0A0E2E"
+          }
         }
-      }
-    ],
+      ],
       "expo-sqlite",
       "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "3c8b48af-2220-4da7-be4c-1907ff768beb"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/3c8b48af-2220-4da7-be4c-1907ff768beb"
     }
   }
 }

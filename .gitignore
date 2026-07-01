@@ -11,7 +11,6 @@ expo-env.d.ts
 .expo/
 .vscode/
 .claude/
-base.db
 credentials_oauth.json
 token.pickle
 data/cache_ids.json
