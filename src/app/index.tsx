@@ -223,8 +223,19 @@ export default function Home() {
 
   // ─── FECHA CONEXÃO ATUAL DO BANCO (se houver) ─────────
   async function fecharBancoAtual() {
-    if (dbRef.current) {
-      try { await dbRef.current.closeAsync(); } catch {}
+    if (!dbRef.current) return;
+
+    const banco = dbRef.current;
+
+    // Remove a referência ANTES de fechar
+    dbRef.current = null;
+    setDb(null);
+
+    try {
+      await banco.closeAsync();
+      console.log("Banco fechado.");
+    } catch (e) {
+      console.log("Erro ao fechar banco:", e);
     }
   }
 
@@ -284,6 +295,10 @@ export default function Home() {
           await FileSystem.deleteAsync(dbPath, { idempotent: true });
           await FileSystem.deleteAsync(dbPath + "-wal", { idempotent: true });
           await FileSystem.deleteAsync(dbPath + "-shm", { idempotent: true });
+
+          await FileSystem.downloadAsync(comCacheBusting(DB_URL), dbPath);
+
+          await carregarBanco();
 
           // 🔥 com timeout — o banco pode ser um arquivo grande, mas 30s é
           // tempo suficiente pra não travar em conexões ruins
@@ -451,12 +466,13 @@ export default function Home() {
     setErroBusca('');
 
     try {
-      if (!dbRef.current) {
-        throw new Error('Banco de dados ainda não está pronto. Tente novamente em instantes.');
-      }
+    const database = dbRef.current;
 
-      // 🔥 timeout de 10s — se a query travar, a gente não fica preso pra sempre
-      const result = await comTimeout(
+    if (!database) {
+      throw new Error('Banco de dados está sendo atualizado. Aguarde alguns segundos.');
+    }
+
+    const result = await database.getAllAsync(
         dbRef.current.getAllAsync('SELECT * FROM casas WHERE matricula = ?', [matricula.trim()]),
         10000,
         'A busca demorou demais e foi cancelada. Tente novamente.'
