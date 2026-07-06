@@ -13,6 +13,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StatusBar,
   StyleSheet,
@@ -33,7 +34,7 @@ import { initDatabase } from '../utils/initDatabase';
 // trecho entre "/d/" e "/view" (ou o parâmetro "id=" se o link já vier nesse formato).
 const BASE_DB_FILE_ID    = "1EZD9pbyZNDkzC36M4JDuPLnrcbksx-94";
 const VERSAO_FILE_ID     = "1iCMp0Xw0TZaUTB1Ye5WZ6N3oWKqkkiHR";
-
+  
 const VERSION_URL = `https://drive.google.com/uc?export=download&id=${VERSAO_FILE_ID}`;
 const DB_URL      = `https://drive.google.com/uc?export=download&id=${BASE_DB_FILE_ID}`;
 // FOTOS_BASE_URL não é mais necessário — a URL completa de cada foto
@@ -46,7 +47,7 @@ function comCacheBusting(url: string) {
   return `${url}${separador}t=${Date.now()}`;
 }
 
-// 🔥 NOVO: envolve qualquer Promise com um limite de tempo.
+// 🔥 envolve qualquer Promise com um limite de tempo.
 // Sem isso, uma operação de rede/arquivo que trava (ex: conexão instável,
 // query presa no SQLite) deixa a tela em "carregando" para sempre,
 // e o usuário precisa fechar o app pra sair do estado travado.
@@ -170,6 +171,9 @@ export default function Home() {
   const [totalImgs, setTotalImgs]             = useState(0);
   const [baixadas, setBaixadas]               = useState(0);
 
+  // 🔥 NOVO: estado do pull-to-refresh (RefreshControl)
+  const [refrescando, setRefrescando]         = useState(false);
+
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const bannerTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -182,6 +186,7 @@ export default function Home() {
   const syncIdRef         = useRef(0);
   const verificandoRef    = useRef(false); // evita 2 verificações de banco simultâneas
   const sincronizandoRef  = useRef(false); // espelha "sincronizando" para uso em closures
+  const buscandoRef       = useRef(false); // espelha "buscando" para uso em closures
 
   useEffect(() => {
     // 🔥 checa se tem atualização OTA (código novo publicado via eas update)
@@ -191,17 +196,17 @@ export default function Home() {
     // primeira abertura do app (cold start) — mostra splash completo
     verificarBanco(true);
 
-    // 🔥 sempre que o app volta a ficar ativo (sair do background/inativo),
-    // verifica de novo — sem mostrar o splash, só o banner no topo
+    // 🔥 REMOVIDO o "verificarBanco(false)" automático ao voltar do
+    // background. Essa era a causa da race condition: o usuário podia
+    // estar no meio de uma busca (usando a conexão do banco) bem na hora
+    // em que o app decidia fechar essa mesma conexão pra trocar o arquivo
+    // .db, gerando o erro "NativeDatabase.prepareAsync ... NullPointerException".
+    //
+    // Agora a verificação automática só roda no cold start. Enquanto o
+    // app está aberto, quem decide atualizar é o usuário, puxando a tela
+    // pra baixo (RefreshControl) — assim nunca teremos uma verificação
+    // rodando ao mesmo tempo que uma busca sem o usuário saber.
     const subscription = AppState.addEventListener('change', (nextState) => {
-      const estavaEmSegundoPlano = appStateRef.current.match(/inactive|background/);
-      if (estavaEmSegundoPlano && nextState === 'active') {
-        // 🔥 se tiver uma sincronização de fotos rolando, não mexe no banco agora
-        // (evita fechar a conexão / trocar o arquivo .db no meio de uma operação)
-        if (!sincronizandoRef.current) {
-          verificarBanco(false);
-        }
-      }
       appStateRef.current = nextState;
     });
 
@@ -241,11 +246,19 @@ export default function Home() {
 
   // ─── VERIFICAÇÃO / ATUALIZAÇÃO DO BANCO ───────────────
   // inicial=true  → cold start, mostra splash de carregamento
-  // inicial=false → app voltou do background, mostra só o banner no topo
+  // inicial=false → chamada manual (pull-to-refresh), mostra só o banner no topo
   async function verificarBanco(inicial: boolean) {
-    // 🔥 evita rodar duas verificações ao mesmo tempo (ex: usuário sai e volta
-    // do app rapidamente, disparando o listener 2x em sequência)
+    // 🔥 evita rodar duas verificações ao mesmo tempo (ex: usuário puxa
+    // pra atualizar duas vezes rápido)
     if (verificandoRef.current) return;
+
+    // 🔥 nunca mexe no banco enquanto uma busca ou sincronização estiver
+    // rolando — evita fechar a conexão embaixo delas
+    if (!inicial && (buscandoRef.current || sincronizandoRef.current)) {
+      mostrarStatus("Aguarde a operação atual terminar antes de atualizar.", 'offline', true);
+      return;
+    }
+
     verificandoRef.current = true;
 
     if (inicial) setCarregando(true);
@@ -296,10 +309,6 @@ export default function Home() {
           await FileSystem.deleteAsync(dbPath + "-wal", { idempotent: true });
           await FileSystem.deleteAsync(dbPath + "-shm", { idempotent: true });
 
-          await FileSystem.downloadAsync(comCacheBusting(DB_URL), dbPath);
-
-          await carregarBanco();
-
           // 🔥 com timeout — o banco pode ser um arquivo grande, mas 30s é
           // tempo suficiente pra não travar em conexões ruins
           await comTimeout(
@@ -309,35 +318,63 @@ export default function Home() {
           );
           await FileSystem.writeAsStringAsync(versionPath, JSON.stringify(remote));
 
+          await carregarBanco();
+
           mostrarStatus("Banco atualizado com sucesso!", 'success', true);
         } else {
           mostrarStatus("Nenhuma atualização disponível.", 'success', true);
+          await carregarBanco();
         }
       } catch {
         mostrarStatus("Não foi possível verificar atualizações agora.", 'offline', true);
+        await carregarBanco();
       }
-
-      await carregarBanco();
     } finally {
       verificandoRef.current = false;
       if (inicial) setCarregando(false);
     }
   }
 
+  // 🔥 NOVO: chamado pelo RefreshControl (puxar a tela pra baixo)
+  async function aoPuxarParaAtualizar() {
+    if (buscandoRef.current || sincronizandoRef.current) {
+      mostrarStatus("Aguarde a operação atual terminar antes de atualizar.", 'offline', true);
+      return;
+    }
+    setRefrescando(true);
+    try {
+      await verificarBanco(false);
+    } finally {
+      setRefrescando(false);
+    }
+  }
+
   async function carregarBanco() {
-    const database = await initDatabase();
-    dbRef.current = database;
-    setDb(database);
+    let database = dbRef.current;
+
+    if (!database) {
+      database = await initDatabase();
+
+      dbRef.current = database;
+      setDb(database);
+    }
+
     const result = await database.getAllAsync(
       `SELECT DISTINCT bairro FROM casas WHERE bairro IS NOT NULL`
     );
+
     const lista = result
       .map((item: any) => item.bairro?.trim())
       .filter(Boolean)
       .sort((a: string, b: string) =>
-        a.localeCompare(b, 'pt-BR', { numeric: true, sensitivity: 'base' })
+        a.localeCompare(b, 'pt-BR', {
+          numeric: true,
+          sensitivity: 'base'
+        })
       );
+
     setBairros(lista);
+
     return database;
   }
 
@@ -454,6 +491,13 @@ export default function Home() {
   async function buscar() {
     if (!matricula.trim()) return;
 
+    // 🔥 bloqueia a busca enquanto o banco estiver sendo trocado
+    // (verificação/atualização em andamento via pull-to-refresh)
+    if (verificandoRef.current) {
+      setErroBusca('Banco de dados sendo atualizado. Aguarde alguns segundos e tente novamente.');
+      return;
+    }
+
     // 🔥 novo "id" de busca — isso é o que resolve o loop infinito:
     // se essa mesma função for chamada de novo (usuário clicou "Buscar"
     // outra vez, ou trocou a matrícula), a busca antiga vira "obsoleta"
@@ -461,19 +505,24 @@ export default function Home() {
     const idDaBusca = ++searchIdRef.current;
 
     setBuscando(true);
+    buscandoRef.current = true;
     setResultado(null);
     setFotoUri(null);
     setErroBusca('');
 
     try {
-    const database = dbRef.current;
+      let database = dbRef.current;
 
-    if (!database) {
-      throw new Error('Banco de dados está sendo atualizado. Aguarde alguns segundos.');
-    }
+      if (!database) {
+        database = await initDatabase();
 
-    const result = await database.getAllAsync(
-        dbRef.current.getAllAsync('SELECT * FROM casas WHERE matricula = ?', [matricula.trim()]),
+        dbRef.current = database;
+        setDb(database);
+      }
+
+
+      const result = await comTimeout(
+        database.getAllAsync('SELECT * FROM casas WHERE matricula = ?', [matricula.trim()]),
         10000,
         'A busca demorou demais e foi cancelada. Tente novamente.'
       );
@@ -505,7 +554,10 @@ export default function Home() {
     } finally {
       // só limpa o "carregando" se essa ainda for a busca mais recente —
       // senão a gente ia esconder o spinner de uma busca nova por engano
-      if (idDaBusca === searchIdRef.current) setBuscando(false);
+      if (idDaBusca === searchIdRef.current) {
+        setBuscando(false);
+        buscandoRef.current = false;
+      }
     }
   }
 
@@ -562,7 +614,21 @@ export default function Home() {
         </View>
       ) : null}
 
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl
+            refreshing={refrescando}
+            onRefresh={aoPuxarParaAtualizar}
+            colors={[C.laranja]}
+            tintColor={C.laranja}
+          />
+        }
+      >
+
+        {/* 🔥 dica pro usuário saber que dá pra puxar pra atualizar */}
+        <Text style={styles.dicaPull}>Puxe a tela para baixo para verificar atualizações</Text>
 
         {/* CARD BUSCA */}
         <View style={styles.card}>
@@ -908,6 +974,15 @@ const styles = StyleSheet.create({
   bannerTexto: {
     fontSize: 13,
     fontWeight: '600',
+  },
+
+  // ── dica de pull-to-refresh ─────────────────────────────
+  dicaPull: {
+    fontSize: 11,
+    color: C.cinzaTexto,
+    textAlign: 'center',
+    marginBottom: 12,
+    opacity: 0.8,
   },
 
   // ── scroll / cards ──────────────────────────────────────
