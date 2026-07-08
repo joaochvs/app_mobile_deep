@@ -1,3 +1,4 @@
+import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Linking from 'expo-linking';
@@ -378,13 +379,27 @@ export default function Home() {
     return database;
   }
 
-  function abrirNoMapa(lat: number, lng: number) {
-    Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`);
-  }
+    async function abrirNoMapa(lat: number, lng: number) {
+      const online = await testarConectividade();
+      const coordenada = `${lat}, ${lng}`;
 
-  function delay(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
+      if (!online) {
+        await Clipboard.setStringAsync(coordenada);
+        Alert.alert(
+          'Sem internet',
+          `Coordenada copiada: ${coordenada}\n\n` +
+          'Abra o Google Maps e cole no campo de busca. Como o mapa offline já está baixado, a navegação funciona normalmente.'
+        );
+        return;
+      }
+
+      const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+      Linking.openURL(url);
+    }
+
+      function delay(ms: number) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+      }
 
   async function baixarImagemComRetry(url: string, path: string) {
     for (let i = 0; i < 3; i++) {
