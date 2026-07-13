@@ -68,6 +68,18 @@ def get_versao_atual(service, pasta_id):
     return 0
 
 
+def limpar_foto_url(foto_url):
+    """
+    Às vezes a célula do Excel vem com mais de uma URL,
+    separadas por quebra de linha (ou espaço). Nesses casos,
+    usa só a primeira URL para não perder a foto.
+    """
+    if not isinstance(foto_url, str):
+        return foto_url
+    url_limpa = foto_url.replace("\r\n", "\n").split("\n")[0].split(" ")[0].strip()
+    return url_limpa
+
+
 # ─── INÍCIO ─────────────────────────────────────────────
 print("☁️  Conectando ao Drive...")
 service = get_drive_service()
@@ -152,7 +164,7 @@ print(f"✅ {len(df)} registros")
 # ─── PROCESSA CADA LINHA ─────────────────────────────────
 print("\n📸 Processando fotos...")
 dados = []
-total = baixadas = existentes = erros = 0
+total = baixadas = existentes = erros = urls_multiplas = 0
 
 for i, row in df.iterrows():
     total += 1
@@ -161,8 +173,14 @@ for i, row in df.iterrows():
     endereco = row.get("1.6 Logradouro_field")
     numero   = row.get("1.7.1 Número_field")
     foto_url = row.get("1.9.1 Tire uma foto da visita da propriedade (horizontal)_field")
-    latitude  = row.get("latitude")
-    longitude = row.get("longitude")
+    latitude  = row.get("Latitude")
+    longitude = row.get("Longitude")
+
+    # ── correção: célula pode vir com mais de uma URL ──
+    if isinstance(foto_url, str) and ("\n" in foto_url or "\r" in foto_url):
+        urls_multiplas += 1
+        print(f"  ⚠️  {codigo}: mais de uma URL na célula, usando a primeira")
+    foto_url = limpar_foto_url(foto_url)
 
     foto_drive_url = None
     nome_arquivo = f"{codigo}.jpg"
@@ -231,10 +249,11 @@ upload_arquivo_local(service, "data/versao.json", "versao.json", PASTA_DRIVE_ID,
 # ─── RELATÓRIO ───────────────────────────────────────────
 print(f"""
 ✅ FINALIZADO — versão {nova_versao} publicada!
-📊 Total registros : {total}
-⬆️  Fotos novas     : {baixadas}
-⏩ Já no Drive     : {existentes}
-❌ Erros           : {erros}
+📊 Total registros   : {total}
+⬆️  Fotos novas       : {baixadas}
+⏩ Já no Drive       : {existentes}
+🔀 URLs múltiplas    : {urls_multiplas} (usada a primeira em cada)
+❌ Erros             : {erros}
 """)
 
 
