@@ -1,4 +1,5 @@
 #%%
+
 import pandas as pd
 import sqlite3
 import json
@@ -256,5 +257,7 @@ print(f"""
 ❌ Erros             : {erros}
 """)
 
+
+# %%
 
 #%%
