@@ -1,56 +1,85 @@
-# Welcome to your Expo app 👋
+# DEEP Mobile
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Aplicativo mobile para consulta de propriedades e fotos em campo, com suporte a funcionamento offline. Os dados ficam em SQLite no celular e as fotos são baixadas diretamente do S3 durante a sincronização por município/setor.
 
-## Get started
+## Fluxo atual
 
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```text
+Excel recebido (registros novos)
+             ↓
+      Publicador DEEP
+             ↓
+Validação + base acumulada + SQLite
+             ↓
+ Google Drive: base.db + versao.json
+             ↓
+ Aplicativo atualiza o SQLite
+             ↓
+ Aplicativo baixa fotos diretamente do S3
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+As fotos não são copiadas para o Google Drive. O Drive armazena somente o banco `base.db` e o manifesto `versao.json`.
 
-### Other setup steps
+## Tecnologias
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+- Expo SDK 56 e React Native.
+- TypeScript e Expo Router.
+- SQLite para consultas offline.
+- Python, pandas e Tkinter no Publicador DEEP.
+- Google Drive para distribuição do banco e do manifesto.
+- S3 da DEEPESSOAS para as fotos.
+- EAS Update para atualizações de JavaScript/TypeScript.
 
-## Learn more
+## Uso rápido do publicador
 
-To learn more about developing your project with Expo, look at the following resources:
+1. Execute `Abrir Publicador DEEP.bat`.
+2. Clique em **Escolher Excel** e selecione o arquivo recebido.
+3. Clique em **1. Validar somente**.
+4. Confira a aba utilizada, registros novos e avisos.
+5. Clique em **2. Adicionar e publicar**.
+6. Confirme a operação e aguarde a mensagem de sucesso.
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+O publicador prioriza automaticamente a aba `REVISITA`, mantém a base anterior e adiciona somente linhas novas.
 
-## Join the community
+A navegação lateral reúne três áreas: **Publicação**, com indicadores e ações do fluxo; **Setores**, para pesquisar, finalizar ou reativar setores; e **Histórico**, com o registro das alterações de status.
 
-Join our community of developers creating universal apps.
+## Desenvolvimento do aplicativo
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+```powershell
+npm install
+npx expo start
+```
+
+Outros comandos:
+
+```powershell
+npm run android
+npm run web
+npm run lint
+```
+
+## Documentação
+
+- [Arquitetura](docs/ARQUITETURA.md)
+- [Publicação de dados](docs/PUBLICACAO_DADOS.md)
+- [Atualizações do aplicativo](docs/ATUALIZACAO_APP.md)
+- [Solução de problemas](docs/SOLUCAO_PROBLEMAS.md)
+- [Segurança e cuidados com dados](docs/SEGURANCA.md)
+
+## Arquivos principais
+
+| Arquivo | Responsabilidade |
+|---|---|
+| `src/app/index.tsx` | Tela, consulta, atualização do banco e sincronização offline |
+| `src/utils/initDatabase.native.ts` | Inicialização do SQLite no dispositivo |
+| `subir_google_drive.py` | Validação, geração e publicação dos dados |
+| `publicador_deep.py` | Interface gráfica do publicador |
+| `data/BASE_ACUMULADA.xlsx` | Fonte acumulada usada nas publicações |
+| `data/controle_setores.json` | Status e histórico dos setores ativos/finalizados |
+| `assets/base.db` | Banco SQLite gerado e banco inicial do app |
+| `data/versao.json` | Manifesto da versão publicada |
+| `eas.json` | Perfis e canais de build/update |
+
+## Regra importante
+
+Use **Validar somente** antes de cada publicação. Não edite manualmente `base.db` ou `versao.json`; eles são gerados pelo publicador.

@@ -1,0 +1,39 @@
+{
+  "versao": 1,
+  "setores": {
+    "setor teste - setor 2": {
+      "nome": "SETOR TESTE - SETOR 2",
+      "status": "finalizado",
+      "alteradoEm": "2026-08-11T12:01:02-03:00",
+      "responsavel": "João",
+      "observacao": "teste"
+    },
+    "setor teste - setor 3": {
+      "nome": "SETOR TESTE - SETOR 3",
+      "status": "finalizado",
+      "alteradoEm": "2026-08-11T13:03:12-03:00",
+      "responsavel": "Joao",
+      "observacao": "teste"
+    }
+  },
+  "historico": [
+    {
+      "setor": "SETOR TESTE - SETOR 2",
+      "acao": "finalizado",
+      "nome": "SETOR TESTE - SETOR 2",
+      "status": "finalizado",
+      "alteradoEm": "2026-08-11T12:01:02-03:00",
+      "responsavel": "João",
+      "observacao": "teste"
+    },
+    {
+      "setor": "SETOR TESTE - SETOR 3",
+      "acao": "finalizado",
+      "nome": "SETOR TESTE - SETOR 3",
+      "status": "finalizado",
+      "alteradoEm": "2026-08-11T13:03:12-03:00",
+      "responsavel": "Joao",
+      "observacao": "teste"
+    }
+  ]
+}

@@ -30,6 +30,7 @@ ARQUIVO_EXCEL_PADRAO = PASTA_PROJETO / "data" / "REVISITAS_CENSO.xlsx"
 BASE_ACUMULADA = PASTA_PROJETO / "data" / "BASE_ACUMULADA.xlsx"
 BANCO_LOCAL = PASTA_PROJETO / "assets" / "base.db"
 VERSAO_LOCAL = PASTA_PROJETO / "data" / "versao.json"
+CONTROLE_SETORES = PASTA_PROJETO / "data" / "controle_setores.json"
 PASTA_RELATORIOS = PASTA_PROJETO / "relatorios"
 COLUNA_CONTROLE_NOVO = "__registro_novo__"
 
@@ -110,6 +111,125 @@ def aplicar_setor_ao_municipio(municipio, endereco_setor):
     return f"{municipio_base} - SETOR {setor}", setor
 
 
+def carregar_controle_setores(caminho=CONTROLE_SETORES):
+    if not caminho.exists():
+        return {"versao": 1, "setores": {}, "historico": []}
+    try:
+        controle = json.loads(caminho.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as erro:
+        raise ValueError(f"Controle de setores inválido: {erro}") from erro
+    controle.setdefault("versao", 1)
+    controle.setdefault("setores", {})
+    controle.setdefault("historico", [])
+    return controle
+
+
+def salvar_controle_setores(controle, caminho=CONTROLE_SETORES):
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    temporario = caminho.with_suffix(".novo.json")
+    temporario.write_text(json.dumps(controle, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporario, caminho)
+
+
+def alterar_status_setor(setor, status, responsavel, observacao="", caminho=CONTROLE_SETORES):
+    if status not in {"ativo", "finalizado"}:
+        raise ValueError("Status de setor inválido.")
+    setor = texto_limpo(setor)
+    responsavel = texto_limpo(responsavel)
+    if not setor or not responsavel:
+        raise ValueError("Setor e responsável são obrigatórios.")
+
+    controle = carregar_controle_setores(caminho)
+    chave = normalizar_nome(setor)
+    data = datetime.now().astimezone().isoformat(timespec="seconds")
+    registro = {
+        "nome": setor,
+        "status": status,
+        "alteradoEm": data,
+        "responsavel": responsavel,
+        "observacao": texto_limpo(observacao) or "",
+    }
+    controle["setores"][chave] = registro
+    controle["historico"].append({"setor": setor, "acao": status, **registro})
+    salvar_controle_setores(controle, caminho)
+    return registro
+
+
+def obter_status_setor(setor, controle=None):
+    controle = controle or carregar_controle_setores()
+    registro = controle["setores"].get(normalizar_nome(setor), {})
+    return registro.get("status", "ativo"), registro
+
+
+def listar_setores_base(caminho_base=BASE_ACUMULADA, caminho_controle=CONTROLE_SETORES):
+    if not caminho_base.exists():
+        raise FileNotFoundError(f"Base acumulada não encontrada: {caminho_base}")
+    nomes_necessarios = {
+        normalizar_nome("1.4 Município_field"), normalizar_nome("bairro"),
+        normalizar_nome("município"), normalizar_nome("municipio"), normalizar_nome("endereco"),
+        normalizar_nome("codigo_unico"), normalizar_nome("código único"),
+        normalizar_nome("1.1.1 Matrícula_field"),
+    }
+    df = pd.read_excel(caminho_base, usecols=lambda coluna: normalizar_nome(coluna) in nomes_necessarios)
+    colunas = localizar_colunas(df)
+    if "bairro" not in colunas:
+        raise ValueError("A base acumulada não possui a coluna de município/setor.")
+
+    contagens = {}
+    for _, row in df.iterrows():
+        if "matricula" in colunas and not matricula_limpa(row.get(colunas["matricula"])):
+            continue
+        municipio = row.get(colunas["bairro"])
+        endereco_setor = row.get(colunas["endereco_setor"]) if "endereco_setor" in colunas else None
+        setor, _ = aplicar_setor_ao_municipio(municipio, endereco_setor)
+        setor = texto_limpo(setor)
+        if setor:
+            contagens[setor] = contagens.get(setor, 0) + 1
+
+    controle = carregar_controle_setores(caminho_controle)
+    resultado = []
+    for setor, quantidade in sorted(contagens.items(), key=lambda item: normalizar_nome(item[0])):
+        gerenciavel = bool(re.search(r"\s-\sSETOR\s\d+$", setor, re.IGNORECASE))
+        status, registro = obter_status_setor(setor, controle)
+        if not gerenciavel:
+            status = "sem setor"
+        resultado.append({
+            "setor": setor,
+            "status": status,
+            "registros": quantidade,
+            "alteradoEm": registro.get("alteradoEm", ""),
+            "responsavel": registro.get("responsavel", ""),
+            "observacao": registro.get("observacao", ""),
+            "gerenciavel": gerenciavel,
+        })
+    return resultado
+
+
+def aplicar_controle_setores(dados, caminho_controle=CONTROLE_SETORES):
+    controle = carregar_controle_setores(caminho_controle)
+    finalizados = {
+        chave for chave, registro in controle["setores"].items()
+        if registro.get("status") == "finalizado"
+    }
+    if not finalizados:
+        return dados.copy(), {
+            "setoresFinalizados": 0,
+            "registrosExcluidosSetores": 0,
+            "registrosNovosEmSetorFinalizado": 0,
+        }
+
+    mascara_excluida = dados["bairro"].fillna("").map(normalizar_nome).isin(finalizados)
+    novos_excluidos = int((mascara_excluida & dados["_novo"].fillna(False).astype(bool)).sum())
+    ativos = dados.loc[~mascara_excluida].copy()
+    if ativos.empty:
+        raise ValueError("Todos os registros pertencem a setores finalizados; publicação cancelada.")
+    return ativos, {
+        "setoresFinalizados": len(finalizados),
+        "registrosExcluidosSetores": int(mascara_excluida.sum()),
+        "registrosNovosEmSetorFinalizado": novos_excluidos,
+    }
+
+
 def hash_linhas(df):
     normalizado = df.astype("string").fillna("").apply(lambda coluna: coluna.str.strip())
     return pd.util.hash_pandas_object(normalizado, index=False)
@@ -130,7 +250,7 @@ def preparar_base(caminho_excel, incremental):
     if not incremental:
         recebida = pd.concat([
             recebida,
-            pd.Series(True, index=recebida.index, name=COLUNA_CONTROLE_NOVO),
+            pd.Series(False, index=recebida.index, name=COLUNA_CONTROLE_NOVO),
         ], axis=1)
         return recebida, None, {
             "modo": "base completa", "registrosRecebidos": len(recebida),
@@ -420,6 +540,9 @@ def main():
             raise ValueError("Nenhum registro novo para publicar.")
     dados, avisos, resumo = validar_excel(caminho, df_combinado)
     resumo.update(resumo_importacao)
+    dados_publicacao, resumo_setores = aplicar_controle_setores(dados)
+    resumo.update(resumo_setores)
+    resumo["registrosPublicadosPrevistos"] = len(dados_publicacao)
     if args.incremental and novos is not None and not novos.empty:
         _, avisos_novos, _ = validar_excel(caminho, novos)
         resumo["avisosNovos"] = len(avisos_novos)
@@ -427,6 +550,17 @@ def main():
         resumo["avisosNovos"] = resumo["avisos"]
     relatorio_json, relatorio_csv = salvar_relatorio(avisos, resumo)
     print(f"✅ {resumo['registrosValidos']} registros válidos")
+    print(f"🟢 {len(dados_publicacao)} registros de setores ativos no banco")
+    if resumo["setoresFinalizados"]:
+        print(
+            f"📦 {resumo['registrosExcluidosSetores']} registros preservados no histórico e "
+            f"retirados do banco ({resumo['setoresFinalizados']} setores finalizados)"
+        )
+    if resumo["registrosNovosEmSetorFinalizado"]:
+        print(
+            f"⚠️ {resumo['registrosNovosEmSetorFinalizado']} registro(s) novo(s) pertencem a "
+            "setor finalizado e não entrarão no banco"
+        )
     if args.incremental:
         print(f"⚠️ {resumo['avisosNovos']} avisos nos registros novos")
         print(f"🗃️ {resumo['avisos']} avisos no total acumulado")
@@ -436,7 +570,7 @@ def main():
     if args.validar_apenas:
         print("🛡️ Validação concluída. Nada foi alterado no Drive.")
         return
-    publicar(dados, resumo)
+    publicar(dados_publicacao, resumo)
     if args.incremental:
         caminho_temporario = BASE_ACUMULADA.with_suffix(".nova.xlsx")
         df_combinado.drop(columns=[COLUNA_CONTROLE_NOVO], errors="ignore").to_excel(
