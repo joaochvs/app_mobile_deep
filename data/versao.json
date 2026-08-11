@@ -1,1 +1,9 @@
-{"versao": 51}
+{
+  "versao": 61,
+  "publicadoEm": "2026-08-10T21:47:50-03:00",
+  "totalRegistros": 3748,
+  "totalFotos": 3616,
+  "tamanhoBanco": 1187840,
+  "hashBanco": "2038229ef6fb55658dd235a22bf687795636c161326abc3e4bdd8c0a8e7fb2d7",
+  "md5Banco": "48f3df2e3d79e7994e8047084b94a80e"
+}

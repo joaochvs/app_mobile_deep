@@ -2,6 +2,7 @@ import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Linking from 'expo-linking';
+import * as SQLite from 'expo-sqlite';
 import * as Updates from 'expo-updates';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -38,6 +39,25 @@ const VERSAO_FILE_ID     = "1iCMp0Xw0TZaUTB1Ye5WZ6N3oWKqkkiHR";
   
 const VERSION_URL = `https://drive.google.com/uc?export=download&id=${VERSAO_FILE_ID}`;
 const DB_URL      = `https://drive.google.com/uc?export=download&id=${BASE_DB_FILE_ID}`;
+
+function obterUrlRemotaFoto(item: any): string | null {
+  return item?.foto ?? null;
+}
+
+function obterNomeLocalFoto(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const driveId = parsed.searchParams.get('id');
+    const identificador = driveId ?? parsed.pathname.split('/').filter(Boolean).pop();
+    if (!identificador) return null;
+
+    const semExtensao = identificador.replace(/\.[^.]+$/, '');
+    const nomeSeguro = semExtensao.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return nomeSeguro ? `${nomeSeguro}.jpg` : null;
+  } catch {
+    return null;
+  }
+}
 // FOTOS_BASE_URL não é mais necessário — a URL completa de cada foto
 // já vem pronta no banco (coluna "foto"), gerada pelo script Python:
 // https://drive.google.com/thumbnail?id=...&sz=w1000
@@ -79,6 +99,14 @@ const C = {
 
 // ─── TIPO DE STATUS DA VERIFICAÇÃO ───────────────────────
 type TipoVerificacao = 'checking' | 'updating' | 'success' | 'offline' | 'idle';
+
+type ManifestoBanco = {
+  versao: number;
+  tamanhoBanco?: number;
+  md5Banco?: string;
+  totalRegistros?: number;
+  publicadoEm?: string;
+};
 
 // ─── UTILITÁRIO: testa se há internet ────────────────────
 async function testarConectividade(): Promise<boolean> {
@@ -245,6 +273,69 @@ export default function Home() {
     }
   }
 
+  // Valida o arquivo novo sem tocar no banco que está em uso. O MD5 detecta
+  // download incompleto e o PRAGMA confirma que o arquivo é um SQLite legível.
+  async function validarBancoBaixado(caminho: string, manifesto: ManifestoBanco) {
+    const info = await FileSystem.getInfoAsync(caminho, { md5: true });
+    if (!info.exists || !info.size) {
+      throw new Error('O banco baixado está vazio.');
+    }
+    if (manifesto.tamanhoBanco && info.size !== manifesto.tamanhoBanco) {
+      throw new Error('O tamanho do banco baixado não confere.');
+    }
+    if (manifesto.md5Banco && info.md5?.toLowerCase() !== manifesto.md5Banco.toLowerCase()) {
+      throw new Error('A assinatura do banco baixado não confere.');
+    }
+
+    const bancoTeste = await SQLite.openDatabaseAsync(caminho);
+    try {
+      const integridade = await bancoTeste.getFirstAsync<{ integrity_check: string }>(
+        'PRAGMA integrity_check'
+      );
+      if (integridade?.integrity_check !== 'ok') {
+        throw new Error('O banco baixado está corrompido.');
+      }
+      const tabela = await bancoTeste.getFirstAsync<{ total: number }>(
+        "SELECT COUNT(*) AS total FROM sqlite_master WHERE type='table' AND name='casas'"
+      );
+      if (!tabela?.total) {
+        throw new Error('O banco baixado não possui a tabela casas.');
+      }
+    } finally {
+      await bancoTeste.closeAsync();
+    }
+  }
+
+  // Faz a troca com possibilidade de rollback: o banco atual vira backup e
+  // somente é removido depois que o novo banco abre corretamente.
+  async function ativarBancoBaixado(caminhoNovo: string, caminhoAtual: string) {
+    const caminhoBackup = caminhoAtual + '.backup';
+    await fecharBancoAtual();
+    await FileSystem.deleteAsync(caminhoAtual + '-wal', { idempotent: true });
+    await FileSystem.deleteAsync(caminhoAtual + '-shm', { idempotent: true });
+    await FileSystem.deleteAsync(caminhoBackup, { idempotent: true });
+
+    const atual = await FileSystem.getInfoAsync(caminhoAtual);
+    if (atual.exists) {
+      await FileSystem.moveAsync({ from: caminhoAtual, to: caminhoBackup });
+    }
+
+    try {
+      await FileSystem.moveAsync({ from: caminhoNovo, to: caminhoAtual });
+      await carregarBanco();
+      await FileSystem.deleteAsync(caminhoBackup, { idempotent: true });
+    } catch (erro) {
+      await fecharBancoAtual();
+      await FileSystem.deleteAsync(caminhoAtual, { idempotent: true });
+      const backup = await FileSystem.getInfoAsync(caminhoBackup);
+      if (backup.exists) {
+        await FileSystem.moveAsync({ from: caminhoBackup, to: caminhoAtual });
+        await carregarBanco();
+      }
+      throw erro;
+    }
+  }
+
   // ─── VERIFICAÇÃO / ATUALIZAÇÃO DO BANCO ───────────────
   // inicial=true  → cold start, mostra splash de carregamento
   // inicial=false → chamada manual (pull-to-refresh), mostra só o banner no topo
@@ -267,6 +358,7 @@ export default function Home() {
 
     try {
       const dbPath      = FileSystem.documentDirectory + "base.db";
+      const dbNovoPath  = FileSystem.documentDirectory + "base.nova.db";
       const versionPath = FileSystem.documentDirectory + "version.json";
 
       const online = await testarConectividade();
@@ -292,7 +384,10 @@ export default function Home() {
           10000,
           'Timeout ao verificar versão do banco.'
         );
-        const remote      = await response.json();
+        if (!response.ok) {
+          throw new Error(`Falha ao consultar versão: HTTP ${response.status}`);
+        }
+        const remote: ManifestoBanco = await response.json();
         let localVersion  = 0;
         const info        = await FileSystem.getInfoAsync(versionPath);
         if (info.exists) {
@@ -303,30 +398,26 @@ export default function Home() {
         if (remote.versao > localVersion) {
           mostrarStatus("Atualizando banco de dados...", 'updating');
 
-          // fecha conexão aberta antes de mexer no arquivo físico
-          await fecharBancoAtual();
-
-          await FileSystem.deleteAsync(dbPath, { idempotent: true });
-          await FileSystem.deleteAsync(dbPath + "-wal", { idempotent: true });
-          await FileSystem.deleteAsync(dbPath + "-shm", { idempotent: true });
-
-          // 🔥 com timeout — o banco pode ser um arquivo grande, mas 30s é
-          // tempo suficiente pra não travar em conexões ruins
+          // O banco atual continua aberto e utilizável durante todo o download.
+          await FileSystem.deleteAsync(dbNovoPath, { idempotent: true });
           await comTimeout(
-            FileSystem.downloadAsync(comCacheBusting(DB_URL), dbPath),
+            FileSystem.downloadAsync(comCacheBusting(DB_URL), dbNovoPath),
             30000,
             'Timeout ao baixar o banco de dados.'
           );
+          await validarBancoBaixado(dbNovoPath, remote);
+          await ativarBancoBaixado(dbNovoPath, dbPath);
+
+          // A versão local só avança depois que o banco novo foi validado e aberto.
           await FileSystem.writeAsStringAsync(versionPath, JSON.stringify(remote));
-
-          await carregarBanco();
-
           mostrarStatus("Banco atualizado com sucesso!", 'success', true);
         } else {
           mostrarStatus("Nenhuma atualização disponível.", 'success', true);
           await carregarBanco();
         }
-      } catch {
+      } catch (erro) {
+        console.log('Erro ao atualizar banco:', erro);
+        await FileSystem.deleteAsync(dbNovoPath, { idempotent: true });
         mostrarStatus("Não foi possível verificar atualizações agora.", 'offline', true);
         await carregarBanco();
       }
@@ -380,23 +471,39 @@ export default function Home() {
   }
 
     async function abrirNoMapa(lat: number, lng: number) {
-      const online = await testarConectividade();
       const coordenada = `${lat}, ${lng}`;
 
-      if (!online) {
+      try {
+        const online = await testarConectividade();
+
+        if (!online) {
+          await Clipboard.setStringAsync(coordenada);
+          Alert.alert(
+            'Sem internet',
+            `Coordenada copiada: ${coordenada}\n\n` +
+            'Abra o Google Maps e cole no campo de busca. Como o mapa offline já está baixado, a navegação funciona normalmente.'
+          );
+          return;
+        }
+
+        // 🔥 NÃO usamos Linking.canOpenURL() aqui — no Android 11+ ele
+        // pode retornar "false" mesmo quando existe um app capaz de abrir
+        // o link, por causa das restrições de "package visibility". Links
+        // http/https são isentos dessa restrição na hora de abrir de
+        // verdade (openURL), então checar antes só gera falso negativo
+        // (foi exatamente o que causou a confusão no debug anterior).
+        const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+        await Linking.openURL(url);
+      } catch (e: any) {
+        console.log('Erro ao abrir mapa:', e);
+        // fallback: garante que o usuário não fica sem nenhuma opção
         await Clipboard.setStringAsync(coordenada);
         Alert.alert(
-          'Sem internet',
-          `Coordenada copiada: ${coordenada}\n\n` +
-          'Abra o Google Maps e cole no campo de busca. Como o mapa offline já está baixado, a navegação funciona normalmente.'
+          'Não foi possível abrir o mapa',
+          `Coordenada copiada: ${coordenada}\n\nCole no seu app de mapas preferido.`
         );
-        return;
       }
-
-      const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
-      Linking.openURL(url);
     }
-
       function delay(ms: number) {
         return new Promise(resolve => setTimeout(resolve, ms));
       }
@@ -449,7 +556,7 @@ export default function Home() {
       if (!dbRef.current) throw new Error('Banco de dados ainda não está pronto.');
 
       const result = await dbRef.current.getAllAsync(
-        "SELECT foto FROM casas WHERE UPPER(bairro)=UPPER(?)", [bairroSelecionado]
+        "SELECT matricula, foto FROM casas WHERE UPPER(bairro)=UPPER(?)", [bairroSelecionado]
       );
       if (idDoSync !== syncIdRef.current) return; // cancelado
 
@@ -467,11 +574,11 @@ export default function Home() {
         await Promise.all(lote.map(async (item: any) => {
           // a coluna "foto" já contém a URL completa do Google Drive
           // (ex: https://drive.google.com/thumbnail?id=XXXX&sz=w1000)
-          const parts = item.foto.split("id=");
-          if (parts.length < 2) return;
-          const id   = parts[1].split("&")[0];
-          const url  = item.foto; // usa a URL real armazenada no banco
-          const path = FileSystem.documentDirectory + "fotos/" + id + ".jpg";
+          const url = obterUrlRemotaFoto(item);
+          if (!url) return;
+          const nomeLocal = obterNomeLocalFoto(url);
+          if (!nomeLocal) return;
+          const path = FileSystem.documentDirectory + "fotos/" + nomeLocal;
           const info = await FileSystem.getInfoAsync(path);
           if (!info.exists) await baixarImagemComRetry(url, path);
           count++;
@@ -536,8 +643,8 @@ export default function Home() {
       }
 
 
-      const result = await comTimeout(
-        database.getAllAsync('SELECT * FROM casas WHERE matricula = ?', [matricula.trim()]),
+      const result = await comTimeout<any[]>(
+        database.getAllAsync('SELECT * FROM casas WHERE matricula = ?', [matricula.trim()]) as Promise<any[]>,
         10000,
         'A busca demorou demais e foi cancelada. Tente novamente.'
       );
@@ -548,17 +655,17 @@ export default function Home() {
       if (result.length > 0) {
         const item = result[0];
         setResultado(item);
-        if (item.foto) {
-          const parts = item.foto.split("id=");
-          if (parts.length >= 2) {
-            const id        = parts[1].split("&")[0];
-            const localPath = FileSystem.documentDirectory + "fotos/" + id + ".jpg";
+        const urlRemota = obterUrlRemotaFoto(item);
+        if (urlRemota) {
+          const nomeLocal = obterNomeLocalFoto(urlRemota);
+          if (nomeLocal) {
+            const localPath = FileSystem.documentDirectory + "fotos/" + nomeLocal;
             const info      = await FileSystem.getInfoAsync(localPath);
             if (idDaBusca !== searchIdRef.current) return; // cancelado nesse meio-tempo
             setFotoUri(
               info.exists
                 ? localPath
-                : item.foto // usa a URL do Drive direto se não tiver baixado ainda
+                : urlRemota
             );
           }
         }
