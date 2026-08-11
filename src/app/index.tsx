@@ -58,9 +58,8 @@ function obterNomeLocalFoto(url: string): string | null {
     return null;
   }
 }
-// FOTOS_BASE_URL não é mais necessário — a URL completa de cada foto
-// já vem pronta no banco (coluna "foto"), gerada pelo script Python:
-// https://drive.google.com/thumbnail?id=...&sz=w1000
+// A coluna "foto" guarda a URL original do S3. O app baixa essa URL
+// diretamente para o armazenamento local durante a sincronização offline.
 
 // adiciona parâmetro de cache-busting respeitando se a URL já tem "?"
 function comCacheBusting(url: string) {
@@ -572,8 +571,7 @@ export default function Home() {
 
         const lote = fotos.slice(i, i + LIMITE);
         await Promise.all(lote.map(async (item: any) => {
-          // a coluna "foto" já contém a URL completa do Google Drive
-          // (ex: https://drive.google.com/thumbnail?id=XXXX&sz=w1000)
+          // A coluna "foto" contém a URL completa do S3.
           const url = obterUrlRemotaFoto(item);
           if (!url) return;
           const nomeLocal = obterNomeLocalFoto(url);

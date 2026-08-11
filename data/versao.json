@@ -1,9 +1,9 @@
 {
-  "versao": 61,
-  "publicadoEm": "2026-08-10T21:47:50-03:00",
-  "totalRegistros": 3748,
-  "totalFotos": 3616,
-  "tamanhoBanco": 1187840,
-  "hashBanco": "2038229ef6fb55658dd235a22bf687795636c161326abc3e4bdd8c0a8e7fb2d7",
-  "md5Banco": "48f3df2e3d79e7994e8047084b94a80e"
+  "versao": 62,
+  "publicadoEm": "2026-08-10T22:06:42-03:00",
+  "totalRegistros": 4889,
+  "totalFotos": 4682,
+  "tamanhoBanco": 1540096,
+  "hashBanco": "269ff230768520f47412c740f4b0a426b74883c9694e5e47c287da6a4077b778",
+  "md5Banco": "8ca5db65cdf17292bf822f7fd049119d"
 }

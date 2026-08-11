@@ -3,6 +3,9 @@
 # dependencies
 node_modules/
 token.piclke
+__pycache__/
+*.py[cod]
+.codex-temp/
 # Expo
 .expo/
 dist/
